@@ -2,10 +2,12 @@
 from classytags.arguments import IntegerArgument, Argument, StringArgument
 from classytags.core import Options
 from classytags.helpers import InclusionTag
+from cms.middleware.multilingual import strip_prefix, rebuild_url
 from django import template
 from django.conf import settings
 from django.contrib.sites.models import Site
 from django.core.cache import cache
+from django.core.handlers.base import get_script_name
 from django.core.urlresolvers import reverse
 from django.utils.translation import activate, get_language, ugettext
 from menus.menu_pool import menu_pool
@@ -357,21 +359,27 @@ class PageLanguageUrl(InclusionTag):
             request = context['request']
         except KeyError:
             return {'template': 'cms/content.html'}
+
         if hasattr(request, "_language_changer"):
             try:
                 setattr(request._language_changer, 'request', request)
             except AttributeError:
                 pass
-            url = "/%s" % lang + request._language_changer(lang)
+            url = request._language_changer(lang)
+
         else:
             page = request.current_page
             if page == "dummy":
                 return {'content': ''}
+
             try:
                 url = page.get_absolute_url(language=lang, fallback=False)
-                url = "/" + lang + url
             except:
                 # no localized path/slug. 
-                url = ''
-        return {'content':url}
+                return {'content': ''}
+
+        script_name = get_script_name(request.environ)
+        url = rebuild_url(script_name, lang, strip_prefix(url, script_name))
+
+        return {'content': url}
 register.tag(PageLanguageUrl)

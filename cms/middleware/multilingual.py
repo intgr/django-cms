@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from cms.utils.i18n import get_default_language
 from django.conf import settings
+from django.core.handlers.base import get_script_name
 from django.core.urlresolvers import reverse
 from django.middleware.locale import LocaleMiddleware
 from django.utils import translation
@@ -18,7 +19,19 @@ def has_lang_prefix(path):
     else:
         return False
 
-def patch_response(content, pages_root, language):
+def strip_prefix(orig, prefix):
+    if not prefix:
+        return orig
+    assert orig.startswith(prefix)
+    return orig[len(prefix):]
+
+def rebuild_url(script_name, language, url):
+    # script_name is always an empty string or a path starting with '/'
+    # url always starts with '/'
+    # language never includes any path components
+    return "%s/%s%s" % (script_name, language, url)
+
+def patch_response(content, script_name, pages_root, language):
     # Customarily user pages are served from http://the.server.com/~username/
     # When a user uses django-cms for his pages, the '~' of the url appears quoted in href links.
     # We have to quote pages_root for the regular expression to match.
@@ -36,13 +49,18 @@ def patch_response(content, pages_root, language):
     #
     # Notice that (?=...) and (?!=...) do not consume input or produce a group in the match object.
     # If the regex matches, the extracted path we want is stored in the fourth group (\4).
+
+    pages_root = strip_prefix(pages_root, script_name)
+    script_name = urllib.quote(script_name)
     quoted_root = urllib.quote(pages_root)
+
     ignore_paths = ['%s%s/' % (quoted_root, l[0]) for l in settings.CMS_LANGUAGES]
     ignore_paths += [settings.MEDIA_URL, settings.ADMIN_MEDIA_PREFIX]
-    if getattr(settings,'STATIC_URL', False):
+    if getattr(settings, 'STATIC_URL', False):
         ignore_paths += [settings.STATIC_URL]
         
-    HREF_URL_FIX_RE = re.compile(ur'<a([^>]+)href=("|\')(?=%s)(?!(%s))(%s(.*?))("|\')(.*?)>' % (
+    HREF_URL_FIX_RE = re.compile(ur'<a([^>]+)href=("|\')%s(?=%s)(?!(%s))(%s(.*?))("|\')(.*?)>' % (
+        re.escape(script_name),
         quoted_root,
         "|".join([re.escape(p) for p in ignore_paths]),
         quoted_root
@@ -56,22 +74,29 @@ def patch_response(content, pages_root, language):
     ignore_paths += [settings.MEDIA_URL, settings.ADMIN_MEDIA_PREFIX]
     if getattr(settings,'STATIC_URL', False):
         ignore_paths += [settings.STATIC_URL]
-    FORM_URL_FIX_RE = re.compile(ur'<form([^>]+)action=("|\')(?=%s)(?!(%s))(%s(.*?))("|\')(.*?)>' % (
+    FORM_URL_FIX_RE = re.compile(ur'<form([^>]+)action=("|\')%s(?=%s)(?!(%s))(%s(.*?))("|\')(.*?)>' % (
+        re.escape(script_name),
         pages_root,
         "|".join([re.escape(p) for p in ignore_paths]),
         pages_root
     ))
 
-    content = HREF_URL_FIX_RE.sub(ur'<a\1href=\2/%s%s\5\6\7>' % (language, pages_root), content)
-    content = FORM_URL_FIX_RE.sub(ur'<form\1action=\2%s%s/\5\6\7>' % (pages_root, language), content).encode("utf8")
-    return content
+    new_prefix = rebuild_url(script_name, language, pages_root)
+    content = HREF_URL_FIX_RE.sub(ur'<a\1href=\2%s\5\6\7>' % new_prefix, content)
+    content = FORM_URL_FIX_RE.sub(ur'<form\1action=\2%s\5\6\7>' % new_prefix, content)
+    return content.encode("utf8")
 
 class MultilingualURLMiddleware(object):
-    def get_language_from_request (self,request):
+    def get_language_from_request(self, request):
         changed = False
+
+        # request.path_info doesn't have SCRIPT_NAME prepended, unlike request.path
         prefix = has_lang_prefix(request.path_info)
         if prefix:
-            request.path = "/" + "/".join(request.path.split("/")[2:])
+            script_name = get_script_name(request.environ)
+            path = strip_prefix(request.path, script_name)
+
+            request.path = script_name + "/" + "/".join(path.split("/")[2:])
             request.path_info = "/" + "/".join(request.path_info.split("/")[2:])
             t = prefix
             if t in SUPPORTED:
@@ -94,16 +119,18 @@ class MultilingualURLMiddleware(object):
                 lang = translation.get_language_from_request(request)
         lang = get_default_language(lang)
         return lang
-    
+
     def process_request(self, request):
         language = self.get_language_from_request(request)
         translation.activate(language)
         request.LANGUAGE_CODE = language
-       
+
     def process_response(self, request, response):
-        language = getattr(request, 'LANGUAGE_CODE', self.get_language_from_request(request))
+        language = getattr(request, 'LANGUAGE_CODE', None)
+        if language is None:
+            language = self.get_language_from_request(request)
         local_middleware = LocaleMiddleware()
-        response =local_middleware.process_response(request, response)
+        response = local_middleware.process_response(request, response)
         path = unicode(request.path)
 
         # note: pages_root is assumed to end in '/'.
@@ -114,6 +141,7 @@ class MultilingualURLMiddleware(object):
                 not (getattr(settings,'STATIC_URL', False) and path.startswith(settings.STATIC_URL)) and \
                 response.status_code == 200 and \
                 response._headers['content-type'][1].split(';')[0] == "text/html":
+
             pages_root = urllib.unquote(reverse("pages-root"))
             try:
                 decoded_response = response.content.decode('utf-8')
@@ -122,6 +150,7 @@ class MultilingualURLMiddleware(object):
 
             response.content = patch_response(
                 decoded_response,
+                get_script_name(request.environ),
                 pages_root,
                 request.LANGUAGE_CODE
             )
@@ -132,6 +161,10 @@ class MultilingualURLMiddleware(object):
                     not location.startswith(settings.MEDIA_URL) and \
                     not (getattr(settings,'STATIC_URL', False) and location.startswith(settings.STATIC_URL)) and \
                     not location.startswith(settings.ADMIN_MEDIA_PREFIX):
-                response['Location'] = "/%s%s" % (language, location)
+
+                script_name = get_script_name(request.environ)
+                location = strip_prefix(location, script_name)
+                response['Location'] = rebuild_url(script_name, language, location)
+
         response.set_cookie("django_language", language)
         return response
