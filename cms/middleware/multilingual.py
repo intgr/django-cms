@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from cms.utils.i18n import get_default_language
 from django.conf import settings
-from django.core.handlers.base import get_script_name
+from django.core.urlresolvers import get_script_prefix
 from django.core.urlresolvers import reverse
 from django.middleware.locale import LocaleMiddleware
 from django.utils import translation
@@ -20,18 +20,16 @@ def has_lang_prefix(path):
         return False
 
 def strip_prefix(orig, prefix):
-    if not prefix:
-        return orig
     assert orig.startswith(prefix)
     return orig[len(prefix):]
 
-def rebuild_url(script_name, language, url):
-    # script_name is always an empty string or a path starting with '/'
-    # url always starts with '/'
+def rebuild_url(prefix, language, url):
+    # script_name always starts and ends with '/'
     # language never includes any path components
-    return "%s/%s%s" % (script_name, language, url)
+    # url never starts with '/'
+    return "%s%s/%s" % (prefix, language, url)
 
-def patch_response(content, script_name, pages_root, language):
+def patch_response(content, pages_root, language):
     # Customarily user pages are served from http://the.server.com/~username/
     # When a user uses django-cms for his pages, the '~' of the url appears quoted in href links.
     # We have to quote pages_root for the regular expression to match.
@@ -50,6 +48,7 @@ def patch_response(content, script_name, pages_root, language):
     # Notice that (?=...) and (?!=...) do not consume input or produce a group in the match object.
     # If the regex matches, the extracted path we want is stored in the fourth group (\4).
 
+    script_name = get_script_prefix()
     pages_root = strip_prefix(pages_root, script_name)
     script_name = urllib.quote(script_name)
     quoted_root = urllib.quote(pages_root)
@@ -90,13 +89,13 @@ class MultilingualURLMiddleware(object):
     def get_language_from_request(self, request):
         changed = False
 
-        # request.path_info doesn't have SCRIPT_NAME prepended, unlike request.path
+        # request.path_info doesn't have script prefix prepended, unlike request.path
         prefix = has_lang_prefix(request.path_info)
         if prefix:
-            script_name = get_script_name(request.environ)
+            script_name = get_script_prefix()
             path = strip_prefix(request.path, script_name)
 
-            request.path = script_name + "/" + "/".join(path.split("/")[2:])
+            request.path = script_name + "/".join(path.split("/")[1:])
             request.path_info = "/" + "/".join(request.path_info.split("/")[2:])
             t = prefix
             if t in SUPPORTED:
@@ -150,7 +149,6 @@ class MultilingualURLMiddleware(object):
 
             response.content = patch_response(
                 decoded_response,
-                get_script_name(request.environ),
                 pages_root,
                 request.LANGUAGE_CODE
             )
@@ -162,7 +160,7 @@ class MultilingualURLMiddleware(object):
                     not (getattr(settings,'STATIC_URL', False) and location.startswith(settings.STATIC_URL)) and \
                     not location.startswith(settings.ADMIN_MEDIA_PREFIX):
 
-                script_name = get_script_name(request.environ)
+                script_name = get_script_prefix()
                 location = strip_prefix(location, script_name)
                 response['Location'] = rebuild_url(script_name, language, location)
 

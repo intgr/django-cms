@@ -378,7 +378,7 @@ class PageLanguageUrl(InclusionTag):
                 # no localized path/slug. 
                 return {'content': ''}
 
-        script_name = get_script_name(request.environ)
+        script_name = get_script_prefix()
         url = rebuild_url(script_name, lang, strip_prefix(url, script_name))
 
         return {'content': url}
